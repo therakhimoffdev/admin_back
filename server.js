@@ -76,18 +76,27 @@ mongoose.connection.on('error', (err) => {
 
 // ======================== HELPERS ========================
 function getClientIp(req) {
-    // Vercel: trust x-forwarded-for but take LAST non-private IP
-    // app.set('trust proxy', true) bo'lganda req.ip ham ishlatsa bo'ladi,
-    // lekin manual olish ishonchli
+    const env = process.env.DEPLOYMENT_ENV || 'production';
+    // DEPLOYMENT_ENV=ngrok  → local test
+    // DEPLOYMENT_ENV=vercel → Vercel production
+    // DEPLOYMENT_ENV=production → boshqa server
+
     const forwarded = req.headers['x-forwarded-for'];
+
     if (forwarded) {
-        const ips = forwarded.split(',').map(ip => ip.trim());
-        // Vercel o'zi oxiriga haqiqiy IP qo'shadi
-        for (let i = ips.length - 1; i >= 0; i--) {
-            const ip = ips[i].replace('::ffff:', '');
-            if (isPublicIp(ip)) return ip;
+        const ips = forwarded.split(',').map(ip => ip.trim().replace('::ffff:', ''));
+
+        if (env === 'ngrok' || env === 'local') {
+            // ngrok: BIRINCHI IP — haqiqiy visitor IP
+            const first = ips[0];
+            if (first && first !== '127.0.0.1' && first !== '::1') return first;
+        } else {
+            // Vercel/production: OXIRGI public IP
+            for (let i = ips.length - 1; i >= 0; i--) {
+                if (isPublicIp(ips[i])) return ips[i];
+            }
+            return ips[0];
         }
-        return ips[0].replace('::ffff:', '');
     }
 
     const cfIp = req.headers['cf-connecting-ip'];
@@ -98,7 +107,6 @@ function getClientIp(req) {
 
     return (req.socket?.remoteAddress || '0.0.0.0').replace('::ffff:', '');
 }
-
 function isPublicIp(ip) {
     if (!ip || ip === '127.0.0.1' || ip === '::1' || ip === '0.0.0.0') return false;
     // RFC1918 private ranges
