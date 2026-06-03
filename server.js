@@ -12,7 +12,9 @@ import Admin from './models/Admin.js';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+
+// ─── Vercel uchun muhim: trust proxy ──────────────────────────────
+app.set('trust proxy', true);
 
 // ─── Middleware ────────────────────────────────────────────────────
 app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
@@ -27,13 +29,13 @@ app.use(cors({
         if (!origin || allowedOrigins.some(o => origin.startsWith(o.trim()))) {
             cb(null, true);
         } else {
-            cb(null, true); // dev uchun hammasiga ruxsat, prod da o'zgartiring
+            cb(null, true);
         }
     },
     credentials: true,
 }));
 
-// Track endpoint rate limit
+// Rate limit
 const trackLimit = rateLimit({
     windowMs: 60 * 1000,
     max: 10,
@@ -41,18 +43,18 @@ const trackLimit = rateLimit({
     skip: (req) => process.env.NODE_ENV === 'development',
 });
 
-// Admin endpoints rate limit
 const adminLimit = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 200,
 });
 
 // ─── MongoDB ───────────────────────────────────────────────────────
-mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://therakhimoffdev_db_user:40g948_SA@cluster0.31ebssu.mongodb.net/')
+// Faqat .env dan o‘qiladi, hardcoded yo‘q
+mongoose.connect(process.env.MONGODB_URI)
     .then(() => console.log('✅ MongoDB connected'))
     .catch(err => console.error('❌ MongoDB error:', err));
 
-// ─── Helpers ───────────────────────────────────────────────────────
+// ─── Helpers (hech qanday o‘zgarish yo‘q) ─────────────────────────
 function getClientIp(req) {
     return (
         req.headers['cf-connecting-ip'] ||
@@ -129,80 +131,80 @@ function parseUserAgent(ua) {
     };
 }
 
-// ─── TRACK ENDPOINT ────────────────────────────────────────────────
+// ─── TRACK ENDPOINT (Vercel’da async/ketma-ket) ───────────────────
 app.post('/api/track', trackLimit, async (req, res) => {
-    res.status(200).json({ ok: true });
-    setImmediate(async () => {
-        try {
-            const ip = getClientIp(req);
-            const ua = req.headers['user-agent'] || '';
-            const body = req.body || {};
+    try {
+        const ip = getClientIp(req);
+        const ua = req.headers['user-agent'] || '';
+        const body = req.body || {};
 
-            const [geoData, deviceData] = await Promise.all([
-                getIpInfo(ip),
-                Promise.resolve(parseUserAgent(ua)),
-            ]);
+        const [geoData, deviceData] = await Promise.all([
+            getIpInfo(ip),
+            Promise.resolve(parseUserAgent(ua)),
+        ]);
 
-            const isVpn = detectVpnFromOrg(geoData.org);
-            const isReturning = await Visitor.exists({
-                ip,
-                visitedAt: { $lt: new Date(), $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
-            });
+        const isVpn = detectVpnFromOrg(geoData.org);
+        const isReturning = await Visitor.exists({
+            ip,
+            visitedAt: { $lt: new Date(), $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
+        });
 
-            const visitor = new Visitor({
-                ip,
-                vpnDetected: isVpn || body.webrtcLeak?.detected || false,
-                vpnDetails: {
-                    isVpn,
-                    isProxy: false,
-                    isTor: false,
-                    isHosting: /hosting|datacenter|cloud/i.test(geoData.org),
-                    org: geoData.org,
-                    asn: '',
-                },
-                geo: geoData,
-                device: deviceData,
-                client: {
-                    screenWidth: body.screen?.width,
-                    screenHeight: body.screen?.height,
-                    viewportWidth: body.viewport?.width,
-                    viewportHeight: body.viewport?.height,
-                    colorDepth: body.screen?.colorDepth,
-                    pixelRatio: body.screen?.pixelRatio,
-                    language: body.language,
-                    languages: body.languages || [],
-                    timezone: body.timezone,
-                    cookiesEnabled: body.cookies,
-                    touchSupport: body.touch?.supported,
-                    maxTouchPoints: body.touch?.maxPoints,
-                    onLine: body.onLine,
-                    platform: body.platform,
-                    doNotTrack: body.doNotTrack,
-                    hardwareConcurrency: body.hardware?.cpuCores,
-                    deviceMemory: body.hardware?.memory,
-                },
-                page: {
-                    url: body.page?.url,
-                    title: body.page?.title,
-                    referrer: body.page?.referrer,
-                    path: body.page?.path,
-                },
-                webrtcLeak: body.webrtcLeak || { detected: false, localIps: [] },
-                fingerprint: body.fingerprint || {},
-                sessionId: body.sessionId,
-                pageLoadTime: body.loadTime,
-                country: geoData.countryCode,
-                isReturning: !!isReturning,
-            });
+        const visitor = new Visitor({
+            ip,
+            vpnDetected: isVpn || body.webrtcLeak?.detected || false,
+            vpnDetails: {
+                isVpn,
+                isProxy: false,
+                isTor: false,
+                isHosting: /hosting|datacenter|cloud/i.test(geoData.org),
+                org: geoData.org,
+                asn: '',
+            },
+            geo: geoData,
+            device: deviceData,
+            client: {
+                screenWidth: body.screen?.width,
+                screenHeight: body.screen?.height,
+                viewportWidth: body.viewport?.width,
+                viewportHeight: body.viewport?.height,
+                colorDepth: body.screen?.colorDepth,
+                pixelRatio: body.screen?.pixelRatio,
+                language: body.language,
+                languages: body.languages || [],
+                timezone: body.timezone,
+                cookiesEnabled: body.cookies,
+                touchSupport: body.touch?.supported,
+                maxTouchPoints: body.touch?.maxPoints,
+                onLine: body.onLine,
+                platform: body.platform,
+                doNotTrack: body.doNotTrack,
+                hardwareConcurrency: body.hardware?.cpuCores,
+                deviceMemory: body.hardware?.memory,
+            },
+            page: {
+                url: body.page?.url,
+                title: body.page?.title,
+                referrer: body.page?.referrer,
+                path: body.page?.path,
+            },
+            webrtcLeak: body.webrtcLeak || { detected: false, localIps: [] },
+            fingerprint: body.fingerprint || {},
+            sessionId: body.sessionId,
+            pageLoadTime: body.loadTime,
+            country: geoData.countryCode,
+            isReturning: !!isReturning,
+        });
 
-            await visitor.save();
-        } catch (err) {
-            console.error('Track save error:', err.message);
-        }
-    });
+        await visitor.save();
+        res.status(200).json({ ok: true });
+    } catch (err) {
+        console.error('Track save error:', err.message);
+        // Vercel’da xatolik bo‘lsa ham clientga 200 qaytarmaymiz, 500 beramiz
+        res.status(500).json({ error: 'Tracking failed' });
+    }
 });
 
-// ─── ADMIN AUTH MIDDLEWARE (faqat token asosida) ───────────────────
+// ─── ADMIN AUTH MIDDLEWARE ─────────────────────────────────────────
 async function adminAuth(req, res, next) {
     const token = req.headers['x-admin-token'] || req.query.token;
     if (!token) {
@@ -222,9 +224,7 @@ async function adminAuth(req, res, next) {
     }
 }
 
-// ─── ADMIN ENDPOINTS (barchasi adminAuth bilan himoyalangan) ───────
-
-// Dashboard stats
+// ─── ADMIN ENDPOINTS (o‘zgarishsiz) ────────────────────────────────
 app.get('/api/admin/stats', adminLimit, adminAuth, async (req, res) => {
     try {
         const now = new Date();
@@ -269,7 +269,6 @@ app.get('/api/admin/stats', adminLimit, adminAuth, async (req, res) => {
     }
 });
 
-// Visitors list with pagination & filters
 app.get('/api/admin/visitors', adminLimit, adminAuth, async (req, res) => {
     try {
         const {
@@ -325,7 +324,6 @@ app.get('/api/admin/visitors', adminLimit, adminAuth, async (req, res) => {
     }
 });
 
-// Single visitor
 app.get('/api/admin/visitors/:id', adminLimit, adminAuth, async (req, res) => {
     try {
         const visitor = await Visitor.findById(req.params.id).lean();
@@ -336,7 +334,6 @@ app.get('/api/admin/visitors/:id', adminLimit, adminAuth, async (req, res) => {
     }
 });
 
-// Daily chart
 app.get('/api/admin/charts/daily', adminLimit, adminAuth, async (req, res) => {
     try {
         const days = parseInt(req.query.days) || 30;
@@ -370,7 +367,6 @@ app.get('/api/admin/charts/daily', adminLimit, adminAuth, async (req, res) => {
     }
 });
 
-// Countries chart
 app.get('/api/admin/charts/countries', adminLimit, adminAuth, async (req, res) => {
     try {
         const data = await Visitor.aggregate([
@@ -384,7 +380,6 @@ app.get('/api/admin/charts/countries', adminLimit, adminAuth, async (req, res) =
     }
 });
 
-// Browsers chart
 app.get('/api/admin/charts/browsers', adminLimit, adminAuth, async (req, res) => {
     try {
         const data = await Visitor.aggregate([
@@ -398,7 +393,6 @@ app.get('/api/admin/charts/browsers', adminLimit, adminAuth, async (req, res) =>
     }
 });
 
-// OS chart
 app.get('/api/admin/charts/os', adminLimit, adminAuth, async (req, res) => {
     try {
         const data = await Visitor.aggregate([
@@ -412,7 +406,6 @@ app.get('/api/admin/charts/os', adminLimit, adminAuth, async (req, res) => {
     }
 });
 
-// Device types chart
 app.get('/api/admin/charts/devices', adminLimit, adminAuth, async (req, res) => {
     try {
         const data = await Visitor.aggregate([
@@ -430,7 +423,6 @@ app.get('/api/admin/charts/devices', adminLimit, adminAuth, async (req, res) => 
     }
 });
 
-// Delete single visitor
 app.delete('/api/admin/visitors/:id', adminLimit, adminAuth, async (req, res) => {
     try {
         await Visitor.findByIdAndDelete(req.params.id);
@@ -440,7 +432,6 @@ app.delete('/api/admin/visitors/:id', adminLimit, adminAuth, async (req, res) =>
     }
 });
 
-// Clear all visitors (with confirmation)
 app.delete('/api/admin/visitors', adminLimit, adminAuth, async (req, res) => {
     try {
         if (req.query.confirm !== 'yes') return res.status(400).json({ error: 'Add ?confirm=yes' });
@@ -451,8 +442,7 @@ app.delete('/api/admin/visitors', adminLimit, adminAuth, async (req, res) => {
     }
 });
 
-// Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok', time: new Date() }));
 
-// Start server
-app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
+// ─── Vercel uchun eksport (app.listen qo‘yilmaydi) ─────────────────
+export default app;
