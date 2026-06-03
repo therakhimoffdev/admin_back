@@ -13,6 +13,76 @@ dotenv.config();
 
 const app = express();
 
+// ======================== PROFESSIONAL LOGGER ========================
+const LOG_LEVELS = { INFO: 'INFO', WARN: 'WARN', ERROR: 'ERROR', DEBUG: 'DEBUG' };
+const isDev = process.env.NODE_ENV === 'development';
+
+function formatLog(level, message, meta = {}) {
+    const timestamp = new Date().toISOString();
+    const logEntry = { timestamp, level, message, ...meta };
+    return JSON.stringify(logEntry);
+}
+
+function logInfo(message, meta = {}) {
+    console.log(formatLog(LOG_LEVELS.INFO, message, meta));
+}
+
+function logWarn(message, meta = {}) {
+    console.warn(formatLog(LOG_LEVELS.WARN, message, meta));
+}
+
+function logError(message, meta = {}) {
+    console.error(formatLog(LOG_LEVELS.ERROR, message, meta));
+}
+
+function logDebug(message, meta = {}) {
+    if (isDev) console.debug(formatLog(LOG_LEVELS.DEBUG, message, meta));
+}
+
+// Request ID generator (simple sequential with process uptime)
+let requestCounter = 0;
+function generateRequestId() {
+    return `req-${Date.now()}-${(++requestCounter) % 10000}`;
+}
+
+// Request logging middleware
+app.use((req, res, next) => {
+    req.requestId = generateRequestId();
+    req.startTime = Date.now();
+    logInfo(`Incoming request`, {
+        requestId: req.requestId,
+        method: req.method,
+        path: req.path,
+        ip: getClientIp(req),
+        userAgent: req.headers['user-agent']?.substring(0, 100),
+    });
+    // Capture response finish
+    const originalJson = res.json;
+    const originalSend = res.send;
+    res.json = function (data) {
+        res._body = data;
+        return originalJson.call(this, data);
+    };
+    res.send = function (body) {
+        res._body = body;
+        return originalSend.call(this, body);
+    };
+    res.on('finish', () => {
+        const duration = Date.now() - req.startTime;
+        const level = res.statusCode >= 500 ? LOG_LEVELS.ERROR : (res.statusCode >= 400 ? LOG_LEVELS.WARN : LOG_LEVELS.INFO);
+        const logFunc = res.statusCode >= 500 ? logError : (res.statusCode >= 400 ? logWarn : logInfo);
+        logFunc(`Request completed`, {
+            requestId: req.requestId,
+            method: req.method,
+            path: req.path,
+            statusCode: res.statusCode,
+            durationMs: duration,
+            contentLength: res.get('Content-Length') || '?',
+        });
+    });
+    next();
+});
+
 // ─── Vercel uchun muhim: trust proxy ──────────────────────────────
 app.set('trust proxy', true);
 
@@ -49,12 +119,11 @@ const adminLimit = rateLimit({
 });
 
 // ─── MongoDB ───────────────────────────────────────────────────────
-// Faqat .env dan o‘qiladi, hardcoded yo‘q
 mongoose.connect(process.env.MONGODB_URI)
-    .then(() => console.log('✅ MongoDB connected'))
-    .catch(err => console.error('❌ MongoDB error:', err));
+    .then(() => logInfo('MongoDB connected', { uri: process.env.MONGODB_URI?.replace(/\/\/([^:]+):([^@]+)@/, '//***:***@') }))
+    .catch(err => logError('MongoDB connection error', { error: err.message }));
 
-// ─── Helpers (hech qanday o‘zgarish yo‘q) ─────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────
 function getClientIp(req) {
     return (
         req.headers['cf-connecting-ip'] ||
@@ -98,7 +167,9 @@ async function getIpInfo(ip) {
                     org: d.org || base.org,
                 };
             }
-        } catch (_) { }
+        } catch (err) {
+            logWarn('IP info fetch failed', { ip, error: err.message });
+        }
     }
     return base;
 }
@@ -131,12 +202,16 @@ function parseUserAgent(ua) {
     };
 }
 
-// ─── TRACK ENDPOINT (Vercel’da async/ketma-ket) ───────────────────
+// ─── TRACK ENDPOINT (with logging) ───────────────────────────────────
 app.post('/api/track', trackLimit, async (req, res) => {
+    const requestId = req.requestId;
+    logDebug('Track endpoint called', { requestId });
     try {
         const ip = getClientIp(req);
         const ua = req.headers['user-agent'] || '';
         const body = req.body || {};
+
+        logDebug('Collecting visitor data', { requestId, ip, uaLength: ua.length });
 
         const [geoData, deviceData] = await Promise.all([
             getIpInfo(ip),
@@ -196,36 +271,44 @@ app.post('/api/track', trackLimit, async (req, res) => {
         });
 
         await visitor.save();
+        logInfo('Visitor saved successfully', { requestId, visitorId: visitor._id, ip, country: geoData.countryCode });
         res.status(200).json({ ok: true });
     } catch (err) {
-        console.error('Track save error:', err.message);
-        // Vercel’da xatolik bo‘lsa ham clientga 200 qaytarmaymiz, 500 beramiz
+        logError('Track endpoint error', { requestId, error: err.message, stack: err.stack });
         res.status(500).json({ error: 'Tracking failed' });
     }
 });
 
-// ─── ADMIN AUTH MIDDLEWARE ─────────────────────────────────────────
+// ─── ADMIN AUTH MIDDLEWARE (with logging) ──────────────────────────
 async function adminAuth(req, res, next) {
     const token = req.headers['x-admin-token'] || req.query.token;
+    const maskedToken = token ? token.substring(0, 8) + '...' : 'missing';
     if (!token) {
+        logWarn('Admin auth failed: token missing', { requestId: req.requestId, path: req.path });
         return res.status(401).json({ error: 'Token required' });
     }
     try {
         const admin = await Admin.findOne({ token, isActive: true });
         if (!admin) {
+            logWarn('Admin auth failed: invalid token', { requestId: req.requestId, path: req.path, tokenPrefix: maskedToken });
             return res.status(401).json({ error: 'Invalid or inactive token' });
         }
         admin.lastUsed = new Date();
         await admin.save();
         req.admin = admin;
+        logInfo('Admin authenticated', { requestId: req.requestId, adminId: admin._id, username: admin.username, role: admin.role });
         next();
     } catch (err) {
+        logError('Admin auth database error', { requestId: req.requestId, error: err.message });
         res.status(500).json({ error: 'Database error' });
     }
 }
 
-// ─── ADMIN ENDPOINTS (o‘zgarishsiz) ────────────────────────────────
+// ─── ADMIN ENDPOINTS (with logging) ─────────────────────────────────
+
+// Dashboard stats
 app.get('/api/admin/stats', adminLimit, adminAuth, async (req, res) => {
+    const requestId = req.requestId;
     try {
         const now = new Date();
         const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -252,6 +335,7 @@ app.get('/api/admin/stats', adminLimit, adminAuth, async (req, res) => {
             Visitor.countDocuments({ isReturning: true }),
         ]);
 
+        logInfo('Stats fetched', { requestId, totalVisitors, todayVisitors });
         res.json({
             totalVisitors,
             todayVisitors,
@@ -265,11 +349,14 @@ app.get('/api/admin/stats', adminLimit, adminAuth, async (req, res) => {
             mobilePercent: totalVisitors ? Math.round((mobileCount / totalVisitors) * 100) : 0,
         });
     } catch (err) {
+        logError('Stats endpoint error', { requestId, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
 
+// Visitors list
 app.get('/api/admin/visitors', adminLimit, adminAuth, async (req, res) => {
+    const requestId = req.requestId;
     try {
         const {
             page = 1,
@@ -312,33 +399,38 @@ app.get('/api/admin/visitors', adminLimit, adminAuth, async (req, res) => {
             Visitor.countDocuments(filter),
         ]);
 
-        res.json({
-            visitors,
-            total,
-            page: parseInt(page),
-            pages: Math.ceil(total / parseInt(limit)),
-            limit: parseInt(limit),
-        });
+        logInfo('Visitors list fetched', { requestId, total, page, limit });
+        res.json({ visitors, total, page: parseInt(page), pages: Math.ceil(total / parseInt(limit)), limit: parseInt(limit) });
     } catch (err) {
+        logError('Visitors list error', { requestId, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
 
+// Single visitor
 app.get('/api/admin/visitors/:id', adminLimit, adminAuth, async (req, res) => {
+    const requestId = req.requestId;
+    const visitorId = req.params.id;
     try {
-        const visitor = await Visitor.findById(req.params.id).lean();
-        if (!visitor) return res.status(404).json({ error: 'Not found' });
+        const visitor = await Visitor.findById(visitorId).lean();
+        if (!visitor) {
+            logWarn('Visitor not found', { requestId, visitorId });
+            return res.status(404).json({ error: 'Not found' });
+        }
+        logInfo('Visitor details fetched', { requestId, visitorId });
         res.json(visitor);
     } catch (err) {
+        logError('Visitor details error', { requestId, visitorId, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
 
+// Daily chart
 app.get('/api/admin/charts/daily', adminLimit, adminAuth, async (req, res) => {
+    const requestId = req.requestId;
     try {
         const days = parseInt(req.query.days) || 30;
         const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-
         const data = await Visitor.aggregate([
             { $match: { visitedAt: { $gte: from } } },
             {
@@ -355,7 +447,7 @@ app.get('/api/admin/charts/daily', adminLimit, adminAuth, async (req, res) => {
             },
             { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } },
         ]);
-
+        logInfo('Daily chart fetched', { requestId, days, points: data.length });
         res.json(data.map(d => ({
             date: `${d._id.year}-${String(d._id.month).padStart(2, '0')}-${String(d._id.day).padStart(2, '0')}`,
             count: d.count,
@@ -363,50 +455,65 @@ app.get('/api/admin/charts/daily', adminLimit, adminAuth, async (req, res) => {
             mobile: d.mobile,
         })));
     } catch (err) {
+        logError('Daily chart error', { requestId, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
 
+// Countries chart
 app.get('/api/admin/charts/countries', adminLimit, adminAuth, async (req, res) => {
+    const requestId = req.requestId;
     try {
         const data = await Visitor.aggregate([
             { $group: { _id: '$geo.country', code: { $first: '$geo.countryCode' }, count: { $sum: 1 } } },
             { $sort: { count: -1 } },
             { $limit: 15 },
         ]);
+        logInfo('Countries chart fetched', { requestId, countries: data.length });
         res.json(data.map(d => ({ country: d._id || 'Unknown', code: d.code, count: d.count })));
     } catch (err) {
+        logError('Countries chart error', { requestId, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
 
+// Browsers chart
 app.get('/api/admin/charts/browsers', adminLimit, adminAuth, async (req, res) => {
+    const requestId = req.requestId;
     try {
         const data = await Visitor.aggregate([
             { $group: { _id: '$device.browser', count: { $sum: 1 } } },
             { $sort: { count: -1 } },
             { $limit: 10 },
         ]);
+        logInfo('Browsers chart fetched', { requestId });
         res.json(data.map(d => ({ browser: d._id || 'Unknown', count: d.count })));
     } catch (err) {
+        logError('Browsers chart error', { requestId, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
 
+// OS chart
 app.get('/api/admin/charts/os', adminLimit, adminAuth, async (req, res) => {
+    const requestId = req.requestId;
     try {
         const data = await Visitor.aggregate([
             { $group: { _id: '$device.os', count: { $sum: 1 } } },
             { $sort: { count: -1 } },
             { $limit: 10 },
         ]);
+        logInfo('OS chart fetched', { requestId });
         res.json(data.map(d => ({ os: d._id || 'Unknown', count: d.count })));
     } catch (err) {
+        logError('OS chart error', { requestId, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
 
+// Device types chart
 app.get('/api/admin/charts/devices', adminLimit, adminAuth, async (req, res) => {
+    const requestId = req.requestId;
     try {
         const data = await Visitor.aggregate([
             {
@@ -417,32 +524,54 @@ app.get('/api/admin/charts/devices', adminLimit, adminAuth, async (req, res) => 
             },
             { $sort: { count: -1 } },
         ]);
+        logInfo('Device types chart fetched', { requestId });
         res.json(data.map(d => ({ device: d._id, count: d.count })));
     } catch (err) {
+        logError('Device types chart error', { requestId, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
 
+// Delete single visitor
 app.delete('/api/admin/visitors/:id', adminLimit, adminAuth, async (req, res) => {
+    const requestId = req.requestId;
+    const visitorId = req.params.id;
     try {
-        await Visitor.findByIdAndDelete(req.params.id);
+        const result = await Visitor.findByIdAndDelete(visitorId);
+        if (!result) {
+            logWarn('Delete failed: visitor not found', { requestId, visitorId });
+            return res.status(404).json({ error: 'Visitor not found' });
+        }
+        logInfo('Visitor deleted', { requestId, visitorId });
         res.json({ ok: true });
     } catch (err) {
+        logError('Delete visitor error', { requestId, visitorId, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
 
+// Clear all visitors
 app.delete('/api/admin/visitors', adminLimit, adminAuth, async (req, res) => {
+    const requestId = req.requestId;
     try {
-        if (req.query.confirm !== 'yes') return res.status(400).json({ error: 'Add ?confirm=yes' });
-        await Visitor.deleteMany({});
-        res.json({ ok: true });
+        if (req.query.confirm !== 'yes') {
+            logWarn('Clear all visitors missing confirmation', { requestId });
+            return res.status(400).json({ error: 'Add ?confirm=yes' });
+        }
+        const result = await Visitor.deleteMany({});
+        logInfo('All visitors cleared', { requestId, deletedCount: result.deletedCount });
+        res.json({ ok: true, deletedCount: result.deletedCount });
     } catch (err) {
+        logError('Clear all visitors error', { requestId, error: err.message });
         res.status(500).json({ error: err.message });
     }
 });
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', time: new Date() }));
+// Health check
+app.get('/api/health', (req, res) => {
+    logDebug('Health check', { requestId: req.requestId });
+    res.json({ status: 'ok', time: new Date() });
+});
 
-// ─── Vercel uchun eksport (app.listen qo‘yilmaydi) ─────────────────
+// ─── Vercel uchun eksport ─────────────────────────────────────────
 export default app;
