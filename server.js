@@ -405,6 +405,16 @@ app.post('/api/track', trackLimit, async (req, res, next) => {
     }
 });
 
+app.get('/api/debug-ip', (req, res) => {
+    res.json({
+        detectedIp: getClientIp(req),
+        forwarded: req.headers['x-forwarded-for'],
+        realIp: req.headers['x-real-ip'],
+        socket: req.socket?.remoteAddress,
+        deploymentEnv: process.env.DEPLOYMENT_ENV,
+    });
+});
+
 // ======================== ADMIN AUTH MIDDLEWARE ========================
 async function adminAuth(req, res, next) {
     const token = req.headers['x-admin-token'] || req.query.token;
