@@ -12,22 +12,18 @@ import Admin from './models/Admin.js';
 dotenv.config();
 
 const app = express();
-
-// ======================== LOGGER ========================
 const isDev = process.env.NODE_ENV !== 'production';
 
+// ======================== LOGGER ========================
 function formatLog(level, message, meta = {}) {
-    const entry = {
+    return JSON.stringify({
         timestamp: new Date().toISOString(),
         level,
         message,
         env: process.env.NODE_ENV || 'unknown',
         ...meta,
-    };
-    // Vercel'da JSON log qilish kerak — stdout'ga
-    return JSON.stringify(entry);
+    });
 }
-
 const logger = {
     info: (msg, meta = {}) => console.log(formatLog('INFO', msg, meta)),
     warn: (msg, meta = {}) => console.warn(formatLog('WARN', msg, meta)),
@@ -35,85 +31,56 @@ const logger = {
     debug: (msg, meta = {}) => { if (isDev) console.debug(formatLog('DEBUG', msg, meta)); },
 };
 
-// ======================== MONGODB (connection caching for Vercel serverless) ========================
+// ======================== MONGODB ========================
 let mongoConnected = false;
 
 async function connectMongo() {
     if (mongoConnected && mongoose.connection.readyState === 1) return;
 
     const uri = process.env.MONGODB_URI;
-    if (!uri) {
-        logger.error('MONGODB_URI environment variable is not set');
-        throw new Error('MONGODB_URI is not configured');
-    }
+    if (!uri) throw new Error('MONGODB_URI is not configured');
 
-    try {
-        await mongoose.connect(uri, {
-            serverSelectionTimeoutMS: 5000,
-            socketTimeoutMS: 10000,
-            maxPoolSize: 10,
-        });
-        mongoConnected = true;
-        logger.info('MongoDB connected', {
-            uri: uri.replace(/\/\/([^:]+):([^@]+)@/, '//***:***@'),
-            readyState: mongoose.connection.readyState,
-        });
-    } catch (err) {
-        mongoConnected = false;
-        logger.error('MongoDB connection failed', { error: err.message });
-        throw err;
-    }
+    await mongoose.connect(uri, {
+        serverSelectionTimeoutMS: 5000,
+        socketTimeoutMS: 10000,
+        maxPoolSize: 10,
+    });
+    mongoConnected = true;
+    logger.info('MongoDB connected', { uri: uri.replace(/\/\/([^:]+):([^@]+)@/, '//***:***@') });
 }
 
-mongoose.connection.on('disconnected', () => {
-    mongoConnected = false;
-    logger.warn('MongoDB disconnected');
-});
-mongoose.connection.on('error', (err) => {
-    mongoConnected = false;
-    logger.error('MongoDB error', { error: err.message });
-});
+mongoose.connection.on('disconnected', () => { mongoConnected = false; logger.warn('MongoDB disconnected'); });
+mongoose.connection.on('error', (err) => { mongoConnected = false; logger.error('MongoDB error', { error: err.message }); });
 
 // ======================== HELPERS ========================
 function getClientIp(req) {
     const env = process.env.DEPLOYMENT_ENV || 'production';
-    // DEPLOYMENT_ENV=ngrok  → local test
-    // DEPLOYMENT_ENV=vercel → Vercel production
-    // DEPLOYMENT_ENV=production → boshqa server
-
     const forwarded = req.headers['x-forwarded-for'];
 
     if (forwarded) {
         const ips = forwarded.split(',').map(ip => ip.trim().replace('::ffff:', ''));
-
         if (env === 'ngrok' || env === 'local') {
-            // ngrok: BIRINCHI IP — haqiqiy visitor IP
             const first = ips[0];
             if (first && first !== '127.0.0.1' && first !== '::1') return first;
         } else {
-            // Vercel/production: OXIRGI public IP
             for (let i = ips.length - 1; i >= 0; i--) {
                 if (isPublicIp(ips[i])) return ips[i];
             }
             return ips[0];
         }
     }
-
     const cfIp = req.headers['cf-connecting-ip'];
     if (cfIp) return cfIp.trim();
-
     const realIp = req.headers['x-real-ip'];
     if (realIp) return realIp.trim();
-
     return (req.socket?.remoteAddress || '0.0.0.0').replace('::ffff:', '');
 }
+
 function isPublicIp(ip) {
     if (!ip || ip === '127.0.0.1' || ip === '::1' || ip === '0.0.0.0') return false;
-    // RFC1918 private ranges
     if (/^10\./.test(ip)) return false;
     if (/^192\.168\./.test(ip)) return false;
     if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) return false;
-    // Vercel internal range
     if (/^169\.254\./.test(ip)) return false;
     return true;
 }
@@ -153,7 +120,6 @@ async function getIpInfo(ip) {
                     org: d.org || base.org,
                 };
             }
-            logger.warn('IPInfo returned non-ok status', { ip, status: res.status });
         } catch (err) {
             logger.warn('IPInfo fetch failed', { ip, error: err.message });
         }
@@ -167,7 +133,6 @@ const VPN_KEYWORDS = [
     'pia', 'windscribe', 'tunnelbear', 'm247', 'datacamp', 'quadranet',
     'choopa', 'vultr', 'linode', 'digitalocean', 'hetzner', 'ovh', 'leaseweb',
 ];
-
 function detectVpnFromOrg(org = '') {
     const lc = org.toLowerCase();
     return VPN_KEYWORDS.some(k => lc.includes(k));
@@ -175,22 +140,14 @@ function detectVpnFromOrg(org = '') {
 
 function parseUserAgent(ua) {
     if (!ua) return {
-        userAgent: '',
-        browser: 'Unknown',
-        browserVersion: '',
-        os: 'Unknown',
-        osVersion: '',
-        deviceType: 'desktop',
-        deviceVendor: '',
-        deviceModel: '',
-        isMobile: false,
-        isBot: false,
+        userAgent: '', browser: 'Unknown', browserVersion: '',
+        os: 'Unknown', osVersion: '', deviceType: 'desktop',
+        deviceVendor: '', deviceModel: '', isMobile: false, isBot: false,
     };
-
     const parser = new UAParser(ua);
     const result = parser.getResult();
     return {
-        userAgent: ua.substring(0, 500), // truncate to avoid oversized docs
+        userAgent: ua.substring(0, 500),
         browser: result.browser.name || 'Unknown',
         browserVersion: result.browser.version || '',
         os: result.os.name || 'Unknown',
@@ -203,72 +160,44 @@ function parseUserAgent(ua) {
     };
 }
 
-// ======================== REQUEST ID & LOGGING MIDDLEWARE ========================
+// ======================== REQUEST LOGGING ========================
 let requestCounter = 0;
-
 app.use((req, res, next) => {
     req.requestId = `req-${Date.now()}-${(++requestCounter) % 100000}`;
     req.startTime = Date.now();
-
     logger.info('Incoming request', {
         requestId: req.requestId,
         method: req.method,
         path: req.path,
-        query: Object.keys(req.query).length ? req.query : undefined,
         ip: getClientIp(req),
-        userAgent: req.headers['user-agent']?.substring(0, 150),
         origin: req.headers['origin'],
     });
-
     res.on('finish', () => {
         const duration = Date.now() - req.startTime;
-        const logFn = res.statusCode >= 500 ? logger.error
-            : res.statusCode >= 400 ? logger.warn
-                : logger.info;
-
-        logFn('Request completed', {
-            requestId: req.requestId,
-            method: req.method,
-            path: req.path,
-            statusCode: res.statusCode,
-            durationMs: duration,
-        });
+        const fn = res.statusCode >= 500 ? logger.error : res.statusCode >= 400 ? logger.warn : logger.info;
+        fn('Request completed', { requestId: req.requestId, method: req.method, path: req.path, statusCode: res.statusCode, durationMs: duration });
     });
-
     next();
 });
 
-// ======================== TRUST PROXY ========================
-// Vercel serverless functions sit behind multiple proxies.
-// Setting to 'true' or a high number causes ERR_ERL_PERMISSIVE_TRUST_PROXY with express-rate-limit.
-// We handle IP extraction manually (getClientIp) so we set this to false
-// and disable rate-limiter's trustProxy validation.
 app.set('trust proxy', false);
 
-// ======================== SECURITY MIDDLEWARE ========================
-app.use(helmet({
-    crossOriginResourcePolicy: { policy: 'cross-origin' },
-    contentSecurityPolicy: false, // API server — CSP not needed
-}));
-
-app.use(express.json({ limit: '50kb' }));
+// ======================== SECURITY ========================
+app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' }, contentSecurityPolicy: false }));
+app.use(express.json({ limit: '100kb' }));
 app.use(express.urlencoded({ extended: false, limit: '50kb' }));
 
 // ======================== CORS ========================
 const rawOrigins = process.env.ALLOWED_ORIGINS || '';
 const allowedOrigins = rawOrigins
     ? rawOrigins.split(',').map(o => o.trim()).filter(Boolean)
-    : ['http://localhost:3000', 'http://localhost:3001', 'http://localhost:5173', 'http://localhost:5174'];
+    : ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:5174'];
 
 app.use(cors({
     origin: (origin, cb) => {
-        // Allow requests with no origin (mobile apps, curl, Postman)
         if (!origin) return cb(null, true);
         const allowed = allowedOrigins.some(o => origin === o || origin.startsWith(o));
-        if (!allowed) {
-            logger.warn('CORS blocked', { origin });
-        }
-        // Pass through regardless — change to `cb(new Error('Not allowed'), false)` to enforce
+        if (!allowed) logger.warn('CORS blocked', { origin });
         cb(null, true);
     },
     credentials: true,
@@ -277,33 +206,22 @@ app.use(cors({
 }));
 
 // ======================== RATE LIMITING ========================
-// validate.trustProxy: false — ERR_ERL_PERMISSIVE_TRUST_PROXY ni to'xtatadi
-// keyGenerator — manuel IP olish
 const trackLimit = rateLimit({
-    windowMs: 60 * 1000,        // 1 minute
-    max: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
+    windowMs: 60 * 1000, max: 10, standardHeaders: true, legacyHeaders: false,
     message: { error: 'Too many requests. Please try again later.' },
     skip: () => isDev,
     validate: { trustProxy: false, xForwardedForHeader: false },
     keyGenerator: (req) => getClientIp(req),
 });
-
 const adminLimit = rateLimit({
-    windowMs: 15 * 60 * 1000,   // 15 minutes
-    max: 200,
-    standardHeaders: true,
-    legacyHeaders: false,
+    windowMs: 15 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false,
     message: { error: 'Too many admin requests.' },
     validate: { trustProxy: false, xForwardedForHeader: false },
     keyGenerator: (req) => getClientIp(req),
 });
 
 // ======================== DB MIDDLEWARE ========================
-// Har bir request oldidan MongoDB ulangan ekanligini tekshir
 app.use(async (req, res, next) => {
-    // Health check uchun DB shart emas
     if (req.path === '/api/health') return next();
     try {
         await connectMongo();
@@ -315,6 +233,17 @@ app.use(async (req, res, next) => {
 });
 
 // ======================== TRACK ENDPOINT ========================
+// ── Duplicate oldini olish strategiyasi ──────────────────────────────────────
+// 1-ustuvorlik: fingerprintId (cookie) — eng ishonchli
+// 2-ustuvorlik: sessionId + IP — bir seans, bir zapis
+// Agar birinchi kirishda shu key bor bo'lsa → update qilamiz (pageviews++)
+// Agar yangi bo'lsa → insert qilamiz
+//
+// Visitor modelida yangi indeks kerak bo'ladi:
+//   fingerprintId: { type: String, sparse: true }
+//   sessionId:     { type: String }
+// Quyidagi upsert logika ular bo'lishini talab qiladi.
+// ─────────────────────────────────────────────────────────────────────────────
 app.post('/api/track', trackLimit, async (req, res, next) => {
     const { requestId } = req;
     try {
@@ -324,7 +253,7 @@ app.post('/api/track', trackLimit, async (req, res, next) => {
 
         logger.debug('Track: processing', { requestId, ip });
 
-        // Parallel geo + UA parsing
+        // ── Parallel: geo info + UA parse ────────────────────────────────────
         const [geoData, deviceData] = await Promise.all([
             getIpInfo(ip),
             Promise.resolve(parseUserAgent(ua)),
@@ -332,70 +261,135 @@ app.post('/api/track', trackLimit, async (req, res, next) => {
 
         const isVpn = detectVpnFromOrg(geoData.org);
 
-        // Returning visitor check (last 30 days)
-        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-        const isReturning = await Visitor.exists({
-            ip,
-            visitedAt: { $gte: thirtyDaysAgo, $lt: new Date() },
-        });
+        // ── Frontend dan kelgan ma'lumotlarni xavfsiz mapping ────────────────
+        // Frontend screen: { width, height, colorDepth, pixelRatio } yuboradi
+        const screen = body.screen || {};
+        const viewport = body.viewport || {};
+        const touch = body.touch || {};
+        const hardware = body.hardware || {};
+        const fingerprint = body.fingerprint || {};
+        const webrtcLeak = body.webrtcLeak || {};
 
-        const visitor = new Visitor({
+        // ── Duplicate key tanlash ─────────────────────────────────────────────
+        // fingerprintId mavjud bo'lsa — uni ishlatamiz (eng kuchli identifier)
+        // Yo'q bo'lsa — sessionId bilan IP kombinatsiyasi
+        const fingerprintId = fingerprint.id || '';
+        const sessionId = body.sessionId || '';
+
+        const dedupeKey = fingerprintId
+            ? { 'fingerprint.id': fingerprintId }
+            : { sessionId, ip };
+
+        // ── Returning visitor: 30 kun ichida shu key bor bo'lsa ──────────────
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+        const existingVisitor = await Visitor.findOne({
+            ...dedupeKey,
+            visitedAt: { $gte: thirtyDaysAgo },
+        }).lean();
+
+        const isReturning = !!existingVisitor;
+
+        // ── Yoziladigan ma'lumotlar ───────────────────────────────────────────
+        const visitorData = {
             ip,
-            vpnDetected: isVpn || body.webrtcLeak?.detected || false,
+            vpnDetected: isVpn || webrtcLeak.detected || false,
             vpnDetails: {
                 isVpn,
                 isProxy: false,
-                isTor: false,
+                isTor: (geoData.org || '').toLowerCase().includes('tor'),
                 isHosting: /hosting|datacenter|cloud/i.test(geoData.org),
                 org: geoData.org,
                 asn: '',
             },
             geo: geoData,
             device: deviceData,
+            // ── To'g'ri mapping: server modeliga mos ─────────────────────────
             client: {
-                screenWidth: body.screen?.width,
-                screenHeight: body.screen?.height,
-                viewportWidth: body.viewport?.width,
-                viewportHeight: body.viewport?.height,
-                colorDepth: body.screen?.colorDepth,
-                pixelRatio: body.screen?.pixelRatio,
-                language: body.language,
+                screenWidth: Number(screen.width) || 0,
+                screenHeight: Number(screen.height) || 0,
+                viewportWidth: Number(viewport.width) || 0,
+                viewportHeight: Number(viewport.height) || 0,
+                colorDepth: Number(screen.colorDepth) || 0,
+                pixelRatio: Number(screen.pixelRatio) || 1,
+                language: body.language || '',
                 languages: Array.isArray(body.languages) ? body.languages : [],
-                timezone: body.timezone,
-                cookiesEnabled: body.cookies,
-                touchSupport: body.touch?.supported,
-                maxTouchPoints: body.touch?.maxPoints,
-                onLine: body.onLine,
-                platform: body.platform,
+                timezone: body.timezone || '',
+                cookiesEnabled: !!body.cookies,
+                touchSupport: touch.supported ?? false,
+                maxTouchPoints: Number(touch.maxPoints) || 0,
+                onLine: body.onLine !== undefined ? !!body.onLine : true,
+                platform: body.platform || '',
                 doNotTrack: body.doNotTrack,
-                hardwareConcurrency: body.hardware?.cpuCores,
-                deviceMemory: body.hardware?.memory,
+                hardwareConcurrency: Number(hardware.cpuCores) || 0,
+                deviceMemory: Number(hardware.memory) || 0,
             },
             page: {
-                url: body.page?.url,
-                title: body.page?.title,
-                referrer: body.page?.referrer,
-                path: body.page?.path,
+                url: (body.page?.url || '').slice(0, 500),
+                title: (body.page?.title || '').slice(0, 200),
+                referrer: (body.page?.referrer || '').slice(0, 500),
+                path: (body.page?.path || ''),
             },
-            webrtcLeak: body.webrtcLeak || { detected: false, localIps: [] },
-            fingerprint: body.fingerprint || {},
-            sessionId: body.sessionId,
-            pageLoadTime: body.loadTime,
+            webrtcLeak: {
+                detected: !!webrtcLeak.detected,
+                localIps: Array.isArray(webrtcLeak.localIps) ? webrtcLeak.localIps : [],
+                publicIps: Array.isArray(webrtcLeak.publicIps) ? webrtcLeak.publicIps : [],
+            },
+            fingerprint: {
+                id: fingerprint.id || '',
+                canvas: fingerprint.canvas || '',
+                audio: fingerprint.audio || '',
+                webgl: fingerprint.webgl || '',
+                webglVendor: fingerprint.webglVendor || '',
+                fonts: fingerprint.fonts || '',
+                hash: fingerprint.id || '',
+            },
+            sessionId,
+            pageLoadTime: Number(body.loadTime) || 0,
             country: geoData.countryCode,
-            isReturning: !!isReturning,
-        });
+            isReturning,
+            // Qo'shimcha qulay maydonlar
+            publicIpHint: (body.publicIpHint || '').slice(0, 45),
+            battery: body.battery || null,
+            connection: body.connection || null,
+            // Pageview counter
+            visitedAt: new Date(),
+            lastSeenAt: new Date(),
+        };
 
-        await visitor.save();
+        // ── Upsert: yangi bo'lsa insert, bo'lsa pageviews ++ ─────────────────
+        let visitor;
+        if (existingVisitor) {
+            // Mavjud yozuvni yangilash: ba'zi maydonlar o'zgarishi mumkin
+            visitor = await Visitor.findByIdAndUpdate(
+                existingVisitor._id,
+                {
+                    $set: {
+                        lastSeenAt: new Date(),
+                        'page.url': visitorData.page.url,
+                        'page.title': visitorData.page.title,
+                        'page.path': visitorData.page.path,
+                        onLine: visitorData.client.onLine,
+                    },
+                    $inc: { pageviews: 1 },
+                },
+                { new: true }
+            );
+        } else {
+            visitor = new Visitor({ ...visitorData, pageviews: 1 });
+            await visitor.save();
+        }
 
-        logger.info('Visitor saved', {
+        logger.info('Visitor tracked', {
             requestId,
             visitorId: visitor._id.toString(),
-            ip: ip.replace(/\.\d+$/, '.***'), // partially mask IP in logs
+            ip: ip.replace(/\.\d+$/, '.***'),
             country: geoData.countryCode,
             city: geoData.city,
             isVpn,
+            isReturning,
             browser: deviceData.browser,
             os: deviceData.os,
+            action: existingVisitor ? 'updated' : 'created',
         });
 
         res.status(200).json({ ok: true });
@@ -405,6 +399,7 @@ app.post('/api/track', trackLimit, async (req, res, next) => {
     }
 });
 
+// ======================== DEBUG ========================
 app.get('/api/debug-ip', (req, res) => {
     res.json({
         detectedIp: getClientIp(req),
@@ -415,50 +410,28 @@ app.get('/api/debug-ip', (req, res) => {
     });
 });
 
-// ======================== ADMIN AUTH MIDDLEWARE ========================
+// ======================== ADMIN AUTH ========================
 async function adminAuth(req, res, next) {
     const token = req.headers['x-admin-token'] || req.query.token;
-
     if (!token || typeof token !== 'string') {
         logger.warn('Admin auth: token missing', { requestId: req.requestId, path: req.path });
         return res.status(401).json({ error: 'Token required' });
     }
-
-    const tokenPrefix = token.substring(0, 8) + '...';
-
     try {
         const admin = await Admin.findOne({ token, isActive: true }).lean();
         if (!admin) {
-            logger.warn('Admin auth: invalid token', {
-                requestId: req.requestId,
-                path: req.path,
-                tokenPrefix,
-            });
+            logger.warn('Admin auth: invalid token', { requestId: req.requestId, path: req.path });
             return res.status(401).json({ error: 'Invalid or inactive token' });
         }
-
-        // Update lastUsed without blocking response
-        Admin.updateOne({ _id: admin._id }, { lastUsed: new Date() }).catch(err =>
-            logger.warn('Admin lastUsed update failed', { error: err.message })
-        );
-
+        Admin.updateOne({ _id: admin._id }, { lastUsed: new Date() }).catch(() => { });
         req.admin = admin;
-        logger.info('Admin authenticated', {
-            requestId: req.requestId,
-            adminId: admin._id.toString(),
-            username: admin.username,
-            role: admin.role,
-        });
         next();
     } catch (err) {
-        logger.error('Admin auth DB error', { requestId: req.requestId, error: err.message });
         next(err);
     }
 }
 
 // ======================== ADMIN ENDPOINTS ========================
-
-// Dashboard stats
 app.get('/api/admin/stats', adminLimit, adminAuth, async (req, res, next) => {
     try {
         const now = new Date();
@@ -487,12 +460,10 @@ app.get('/api/admin/stats', adminLimit, adminAuth, async (req, res, next) => {
             mobilePercent: totalVisitors ? Math.round((mobileCount / totalVisitors) * 100) : 0,
         });
     } catch (err) {
-        logger.error('Stats error', { requestId: req.requestId, error: err.message });
         next(err);
     }
 });
 
-// Visitors list (pagination, filters, sorting)
 app.get('/api/admin/visitors', adminLimit, adminAuth, async (req, res, next) => {
     try {
         const {
@@ -506,7 +477,6 @@ app.get('/api/admin/visitors', adminLimit, adminAuth, async (req, res, next) => 
         const parsedLimit = Math.min(100, Math.max(1, parseInt(limit) || 20));
 
         const filter = {};
-
         if (search) {
             filter.$or = [
                 { ip: { $regex: search, $options: 'i' } },
@@ -514,6 +484,7 @@ app.get('/api/admin/visitors', adminLimit, adminAuth, async (req, res, next) => 
                 { 'geo.country': { $regex: search, $options: 'i' } },
                 { 'device.browser': { $regex: search, $options: 'i' } },
                 { 'page.url': { $regex: search, $options: 'i' } },
+                { 'fingerprint.id': { $regex: search, $options: 'i' } },
             ];
         }
         if (country) filter['geo.countryCode'] = country;
@@ -526,8 +497,7 @@ app.get('/api/admin/visitors', adminLimit, adminAuth, async (req, res, next) => 
             if (dateTo) filter.visitedAt.$lte = new Date(dateTo);
         }
 
-        // Sanitize sortBy against injection
-        const allowedSortFields = ['visitedAt', 'ip', 'geo.country', 'device.browser', 'device.os'];
+        const allowedSortFields = ['visitedAt', 'lastSeenAt', 'ip', 'geo.country', 'device.browser', 'device.os', 'pageviews'];
         const safeSortBy = allowedSortFields.includes(sortBy) ? sortBy : 'visitedAt';
         const sort = { [safeSortBy]: sortOrder === 'asc' ? 1 : -1 };
         const skip = (parsedPage - 1) * parsedLimit;
@@ -537,118 +507,73 @@ app.get('/api/admin/visitors', adminLimit, adminAuth, async (req, res, next) => 
             Visitor.countDocuments(filter),
         ]);
 
-        logger.debug('Visitors list', { requestId: req.requestId, total, page: parsedPage, filters: Object.keys(filter) });
-
         res.json({
-            visitors,
-            total,
+            visitors, total,
             page: parsedPage,
             pages: Math.ceil(total / parsedLimit),
             limit: parsedLimit,
         });
     } catch (err) {
-        logger.error('Visitors list error', { requestId: req.requestId, error: err.message });
         next(err);
     }
 });
 
-// Single visitor
 app.get('/api/admin/visitors/:id', adminLimit, adminAuth, async (req, res, next) => {
     try {
         const { id } = req.params;
-        if (!mongoose.Types.ObjectId.isValid(id)) {
-            return res.status(400).json({ error: 'Invalid visitor ID' });
-        }
+        if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid visitor ID' });
         const visitor = await Visitor.findById(id).lean();
         if (!visitor) return res.status(404).json({ error: 'Visitor not found' });
         res.json(visitor);
-    } catch (err) {
-        logger.error('Visitor details error', { requestId: req.requestId, error: err.message });
-        next(err);
-    }
+    } catch (err) { next(err); }
 });
 
-// Daily chart
 app.get('/api/admin/charts/daily', adminLimit, adminAuth, async (req, res, next) => {
     try {
         const days = Math.min(365, Math.max(1, parseInt(req.query.days) || 30));
         const from = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-
         const data = await Visitor.aggregate([
             { $match: { visitedAt: { $gte: from } } },
-            {
-                $group: {
-                    _id: {
-                        year: { $year: '$visitedAt' },
-                        month: { $month: '$visitedAt' },
-                        day: { $dayOfMonth: '$visitedAt' },
-                    },
-                    count: { $sum: 1 },
-                    vpn: { $sum: { $cond: ['$vpnDetected', 1, 0] } },
-                    mobile: { $sum: { $cond: ['$device.isMobile', 1, 0] } },
-                },
-            },
+            { $group: { _id: { year: { $year: '$visitedAt' }, month: { $month: '$visitedAt' }, day: { $dayOfMonth: '$visitedAt' } }, count: { $sum: 1 }, vpn: { $sum: { $cond: ['$vpnDetected', 1, 0] } }, mobile: { $sum: { $cond: ['$device.isMobile', 1, 0] } } } },
             { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } },
         ]);
-
         res.json(data.map(d => ({
             date: `${d._id.year}-${String(d._id.month).padStart(2, '0')}-${String(d._id.day).padStart(2, '0')}`,
-            count: d.count,
-            vpn: d.vpn,
-            mobile: d.mobile,
+            count: d.count, vpn: d.vpn, mobile: d.mobile,
         })));
-    } catch (err) {
-        logger.error('Daily chart error', { requestId: req.requestId, error: err.message });
-        next(err);
-    }
+    } catch (err) { next(err); }
 });
 
-// Countries chart
 app.get('/api/admin/charts/countries', adminLimit, adminAuth, async (req, res, next) => {
     try {
         const data = await Visitor.aggregate([
             { $group: { _id: '$geo.country', code: { $first: '$geo.countryCode' }, count: { $sum: 1 } } },
-            { $sort: { count: -1 } },
-            { $limit: 15 },
+            { $sort: { count: -1 } }, { $limit: 15 },
         ]);
         res.json(data.map(d => ({ country: d._id || 'Unknown', code: d.code, count: d.count })));
-    } catch (err) {
-        logger.error('Countries chart error', { requestId: req.requestId, error: err.message });
-        next(err);
-    }
+    } catch (err) { next(err); }
 });
 
-// Browsers chart
 app.get('/api/admin/charts/browsers', adminLimit, adminAuth, async (req, res, next) => {
     try {
         const data = await Visitor.aggregate([
             { $group: { _id: '$device.browser', count: { $sum: 1 } } },
-            { $sort: { count: -1 } },
-            { $limit: 10 },
+            { $sort: { count: -1 } }, { $limit: 10 },
         ]);
         res.json(data.map(d => ({ browser: d._id || 'Unknown', count: d.count })));
-    } catch (err) {
-        logger.error('Browsers chart error', { requestId: req.requestId, error: err.message });
-        next(err);
-    }
+    } catch (err) { next(err); }
 });
 
-// OS chart
 app.get('/api/admin/charts/os', adminLimit, adminAuth, async (req, res, next) => {
     try {
         const data = await Visitor.aggregate([
             { $group: { _id: '$device.os', count: { $sum: 1 } } },
-            { $sort: { count: -1 } },
-            { $limit: 10 },
+            { $sort: { count: -1 } }, { $limit: 10 },
         ]);
         res.json(data.map(d => ({ os: d._id || 'Unknown', count: d.count })));
-    } catch (err) {
-        logger.error('OS chart error', { requestId: req.requestId, error: err.message });
-        next(err);
-    }
+    } catch (err) { next(err); }
 });
 
-// Device types chart
 app.get('/api/admin/charts/devices', adminLimit, adminAuth, async (req, res, next) => {
     try {
         const data = await Visitor.aggregate([
@@ -656,120 +581,48 @@ app.get('/api/admin/charts/devices', adminLimit, adminAuth, async (req, res, nex
             { $sort: { count: -1 } },
         ]);
         res.json(data.map(d => ({ device: d._id, count: d.count })));
-    } catch (err) {
-        logger.error('Device types chart error', { requestId: req.requestId, error: err.message });
-        next(err);
-    }
+    } catch (err) { next(err); }
 });
 
-// Delete single visitor
 app.delete('/api/admin/visitors/:id', adminLimit, adminAuth, async (req, res, next) => {
     try {
         const { id } = req.params;
-        if (!mongoose.Types.ObjectId.isValid(id)) {
-            return res.status(400).json({ error: 'Invalid visitor ID' });
-        }
+        if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ error: 'Invalid visitor ID' });
         const result = await Visitor.findByIdAndDelete(id);
         if (!result) return res.status(404).json({ error: 'Visitor not found' });
-
-        logger.info('Visitor deleted', { requestId: req.requestId, visitorId: id, adminId: req.admin?._id });
+        logger.info('Visitor deleted', { requestId: req.requestId, visitorId: id });
         res.json({ ok: true });
-    } catch (err) {
-        logger.error('Delete visitor error', { requestId: req.requestId, error: err.message });
-        next(err);
-    }
+    } catch (err) { next(err); }
 });
 
-// Clear all visitors
 app.delete('/api/admin/visitors', adminLimit, adminAuth, async (req, res, next) => {
     try {
-        if (req.query.confirm !== 'yes') {
-            return res.status(400).json({ error: 'Add ?confirm=yes to proceed' });
-        }
+        if (req.query.confirm !== 'yes') return res.status(400).json({ error: 'Add ?confirm=yes to proceed' });
         const result = await Visitor.deleteMany({});
-        logger.warn('All visitors cleared', {
-            requestId: req.requestId,
-            adminId: req.admin?._id,
-            deletedCount: result.deletedCount,
-        });
+        logger.warn('All visitors cleared', { requestId: req.requestId, deletedCount: result.deletedCount });
         res.json({ ok: true, deletedCount: result.deletedCount });
-    } catch (err) {
-        logger.error('Clear all visitors error', { requestId: req.requestId, error: err.message });
-        next(err);
-    }
+    } catch (err) { next(err); }
 });
 
-// Health check (no DB required)
 app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        time: new Date().toISOString(),
-        mongo: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-        env: process.env.NODE_ENV || 'unknown',
-        uptime: process.uptime(),
-    });
+    res.json({ status: 'ok', time: new Date().toISOString(), mongo: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected', env: process.env.NODE_ENV || 'unknown', uptime: process.uptime() });
 });
 
-// 404 handler
 app.use((req, res) => {
     logger.warn('Route not found', { requestId: req.requestId, method: req.method, path: req.path });
     res.status(404).json({ error: 'Route not found' });
 });
 
-// ======================== GLOBAL ERROR HANDLER ========================
-// Express'da error handler 4 ta argument olishi shart (err, req, res, next)
 app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
     const statusCode = err.status || err.statusCode || 500;
-    const isServerError = statusCode >= 500;
-
-    logger.error('Unhandled error', {
-        requestId: req.requestId,
-        method: req.method,
-        path: req.path,
-        statusCode,
-        error: err.message,
-        stack: isDev ? err.stack : undefined,
-        type: err.name,
-    });
-
-    // Mongoose validation errors
-    if (err.name === 'ValidationError') {
-        return res.status(400).json({
-            error: 'Validation failed',
-            details: Object.values(err.errors).map(e => e.message),
-        });
-    }
-
-    // Mongoose cast errors (invalid ObjectId etc.)
-    if (err.name === 'CastError') {
-        return res.status(400).json({ error: 'Invalid ID format' });
-    }
-
-    // JSON parse errors
-    if (err.type === 'entity.parse.failed') {
-        return res.status(400).json({ error: 'Invalid JSON in request body' });
-    }
-
-    res.status(statusCode).json({
-        error: isServerError ? 'Internal server error' : err.message,
-        ...(isDev && { details: err.message, stack: err.stack }),
-    });
+    logger.error('Unhandled error', { requestId: req.requestId, statusCode, error: err.message });
+    if (err.name === 'ValidationError') return res.status(400).json({ error: 'Validation failed', details: Object.values(err.errors).map(e => e.message) });
+    if (err.name === 'CastError') return res.status(400).json({ error: 'Invalid ID format' });
+    if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON in request body' });
+    res.status(statusCode).json({ error: statusCode >= 500 ? 'Internal server error' : err.message, ...(isDev && { details: err.message }) });
 });
 
-// ======================== PROCESS HANDLERS ========================
-process.on('unhandledRejection', (reason, promise) => {
-    logger.error('Unhandled Promise Rejection', {
-        reason: reason instanceof Error ? reason.message : String(reason),
-        stack: reason instanceof Error ? reason.stack : undefined,
-    });
-});
+process.on('unhandledRejection', (reason) => { logger.error('Unhandled Rejection', { reason: String(reason) }); });
+process.on('uncaughtException', (err) => { logger.error('Uncaught Exception', { error: err.message }); process.exit(1); });
 
-process.on('uncaughtException', (err) => {
-    logger.error('Uncaught Exception', { error: err.message, stack: err.stack });
-    // Graceful shutdown
-    process.exit(1);
-});
-
-// ======================== VERCEL EXPORT ========================
-// Vercel serverless: app.listen() chaqirilmaydi
 export default app;
