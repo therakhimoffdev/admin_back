@@ -111,7 +111,7 @@ async function getIpInfo(ip) {
         connectionType: 'unknown',
     };
 
-    const token = process.env.IPINFO_TOKEN;
+    const token = '2ad098822ffc65';
     if (token && isPublicIp(ip)) {
         try {
             const res = await fetch(`https://ipinfo.io/${ip}/json?token=${token}`, {
