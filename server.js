@@ -8,6 +8,7 @@ import geoip from 'geoip-lite';
 import dotenv from 'dotenv';
 import Visitor from './models/Visitors.js';
 import Admin from './models/Admin.js';
+import { IPinfoLiteWrapper } from 'node-ipinfo';
 
 dotenv.config();
 
@@ -84,8 +85,9 @@ function isPublicIp(ip) {
     return true;
 }
 
+const ipinfoWrapper = new IPinfoLiteWrapper(process.env.IPINFO_TOKEN || '2ad098822ffc65');
+
 async function getIpInfo(ip) {
-    // 1. Zaxira ma'lumotlari (geoip-lite orqali)
     const geo = geoip.lookup(ip);
     const base = {
         country: geo?.country || 'Unknown',
@@ -102,58 +104,43 @@ async function getIpInfo(ip) {
         connectionType: 'unknown',
     };
 
-    const token = '2ad098822ffc65'; // Tokeningiz o'rnatildi
-
-    if (token && isPublicIp(ip)) {
+    if (isPublicIp(ip)) {
         try {
-            // 2. Yangi IPinfo Lite API'ga Bearer orqali so'rov yuborish
-            const res = await fetch(`https://api.ipinfo.io/lite/${ip}`, {
-                method: 'GET',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Accept': 'application/json'
-                },
-                signal: AbortSignal.timeout(5000), // Vercel ulanishi uchun 5 soniya berildi
-            });
+            // Vercel ulanishi qotib qolmasligi uchun 5 soniyalik timeout bilan o'raymiz
+            const details = await Promise.race([
+                ipinfoWrapper.lookupIp(ip),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+            ]);
 
-            if (res.ok) {
-                const d = await res.json();
+            if (details) {
+                // Kutubxona asn ni obyekt sifatida qaytaradi: { asn: "AS15169", name: "Google LLC", ... }
+                const asnCode = details.asn?.asn || '';
+                const companyName = details.asn?.name || '';
 
-                // 3. Lite versiya javobini sizning funksiyalaringizga moslashtirish
-                const asn = d.asn || '';
-                const companyName = d.as_name || d.name || '';
-
-                // detectOperator va detectConnectionType ishlashi uchun d.org formatini yig'amiz
-                const combinedOrg = companyName ? `${asn} ${companyName}`.trim() : (d.org || '');
-
-                const operator = detectOperator(combinedOrg, asn);
+                const combinedOrg = companyName ? `${asnCode} ${companyName}`.trim() : '';
+                const operator = detectOperator(combinedOrg, asnCode);
                 const connectionType = detectConnectionType(operator, combinedOrg);
 
                 return {
-                    // Lite versiya shahar va mintaqani aniq bermasa, zaxiradan (base) oladi
-                    country: d.country_name || d.country || base.country,
-                    countryCode: d.country_code || d.country || base.countryCode,
-                    region: d.region || base.region,
-                    city: d.city || base.city,
+                    country: details.country || base.country,
+                    countryCode: details.countryCode || base.countryCode,
+                    region: details.region || base.region,
+                    city: details.city || base.city,
                     lat: base.lat,
                     lon: base.lon,
-                    timezone: d.timezone || base.timezone,
+                    timezone: details.timezone || base.timezone,
                     isp: companyName || base.isp,
                     org: combinedOrg || base.org,
-                    asn,
+                    asn: asnCode,
                     operator,
                     connectionType,
                 };
-            } else {
-                const errText = await res.text();
-                logger.warn('IPInfo API xatosi', { ip, status: res.status, error: errText });
             }
         } catch (err) {
-            logger.warn('IPInfo fetch failed', { ip, error: err.message });
+            logger.warn('IPInfo wrapper failed', { ip, error: err.message });
         }
     }
 
-    // Agar fetch ishlamasa yoki xatolik bo'lsa zaxirani qaytaramiz
     return base;
 }
 // ======================== O'ZBEKISTON OPERATORLARINI ANIQLASH ========================
