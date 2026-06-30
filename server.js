@@ -54,33 +54,23 @@ mongoose.connection.on('error', (err) => { mongoConnected = false; logger.error(
 
 // ======================== HELPERS ========================
 function getClientIp(req) {
-    const forwarded = req.headers['x-forwarded-for'];
+    // Vercel o'zining maxsus headerida asl mijoz IP sini beradi
+    const vercelIp = req.headers['x-real-ip'] || req.headers['x-vercel-forwarded-for'];
+    if (vercelIp && isPublicIp(vercelIp.trim())) {
+        return vercelIp.trim();
+    }
 
+    const forwarded = req.headers['x-forwarded-for'];
     if (forwarded) {
         const ips = forwarded.split(',').map(ip => ip.trim().replace('::ffff:', ''));
-
-        // Birinchi IP odatda asl mijoz IP (Vercel, Nginx, Apache)
         const first = ips[0];
-        if (first && first !== '127.0.0.1' && first !== '::1' && isPublicIp(first)) {
+        if (first && isPublicIp(first)) {
             return first;
         }
-
-        // Agar birinchi IP private yoki localhost bo'lsa, keyingi public IP'ni izlaymiz
-        for (const ip of ips) {
-            if (ip && ip !== '127.0.0.1' && ip !== '::1' && isPublicIp(ip)) {
-                return ip;
-            }
-        }
-
-        // Hech narsa topilmasa, birinchisini qaytaramiz (ehtimol hali ham to'g'ri)
-        return first || '0.0.0.0';
     }
 
     const cfIp = req.headers['cf-connecting-ip'];
     if (cfIp) return cfIp.trim();
-
-    const realIp = req.headers['x-real-ip'];
-    if (realIp) return realIp.trim();
 
     return (req.socket?.remoteAddress || '0.0.0.0').replace('::ffff:', '');
 }
@@ -95,6 +85,7 @@ function isPublicIp(ip) {
 }
 
 async function getIpInfo(ip) {
+    // 1. Zaxira ma'lumotlari (geoip-lite orqali)
     const geo = geoip.lookup(ip);
     const base = {
         country: geo?.country || 'Unknown',
@@ -111,41 +102,60 @@ async function getIpInfo(ip) {
         connectionType: 'unknown',
     };
 
-    const token = '2ad098822ffc65';
+    const token = '2ad098822ffc65'; // Tokeningiz o'rnatildi
+
     if (token && isPublicIp(ip)) {
         try {
-            const res = await fetch(`https://ipinfo.io/${ip}/json?token=${token}`, {
-                signal: AbortSignal.timeout(3000),
+            // 2. Yangi IPinfo Lite API'ga Bearer orqali so'rov yuborish
+            const res = await fetch(`https://api.ipinfo.io/lite/${ip}`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Accept': 'application/json'
+                },
+                signal: AbortSignal.timeout(5000), // Vercel ulanishi uchun 5 soniya berildi
             });
+
             if (res.ok) {
                 const d = await res.json();
-                const [lat, lon] = (d.loc || '0,0').split(',').map(Number);
-                const { asn, companyName } = parseOrgField(d.org || '');
-                const operator = detectOperator(d.org || '', asn);
-                const connectionType = detectConnectionType(operator, d.org || '');
+
+                // 3. Lite versiya javobini sizning funksiyalaringizga moslashtirish
+                const asn = d.asn || '';
+                const companyName = d.as_name || d.name || '';
+
+                // detectOperator va detectConnectionType ishlashi uchun d.org formatini yig'amiz
+                const combinedOrg = companyName ? `${asn} ${companyName}`.trim() : (d.org || '');
+
+                const operator = detectOperator(combinedOrg, asn);
+                const connectionType = detectConnectionType(operator, combinedOrg);
 
                 return {
+                    // Lite versiya shahar va mintaqani aniq bermasa, zaxiradan (base) oladi
                     country: d.country_name || d.country || base.country,
-                    countryCode: d.country || base.countryCode,
+                    countryCode: d.country_code || d.country || base.countryCode,
                     region: d.region || base.region,
                     city: d.city || base.city,
-                    lat: isNaN(lat) ? base.lat : lat,
-                    lon: isNaN(lon) ? base.lon : lon,
+                    lat: base.lat,
+                    lon: base.lon,
                     timezone: d.timezone || base.timezone,
-                    isp: companyName || d.hostname || base.isp,
-                    org: d.org || base.org,
+                    isp: companyName || base.isp,
+                    org: combinedOrg || base.org,
                     asn,
                     operator,
                     connectionType,
                 };
+            } else {
+                const errText = await res.text();
+                logger.warn('IPInfo API xatosi', { ip, status: res.status, error: errText });
             }
         } catch (err) {
             logger.warn('IPInfo fetch failed', { ip, error: err.message });
         }
     }
+
+    // Agar fetch ishlamasa yoki xatolik bo'lsa zaxirani qaytaramiz
     return base;
 }
-
 // ======================== O'ZBEKISTON OPERATORLARINI ANIQLASH ========================
 const OPERATOR_PATTERNS = [
     { name: 'Beeline', asn: ['AS28910'], keywords: ['unitel', 'beeline'] },
