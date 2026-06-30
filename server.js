@@ -54,25 +54,34 @@ mongoose.connection.on('error', (err) => { mongoConnected = false; logger.error(
 
 // ======================== HELPERS ========================
 function getClientIp(req) {
-    const env = process.env.DEPLOYMENT_ENV || 'production';
     const forwarded = req.headers['x-forwarded-for'];
 
     if (forwarded) {
         const ips = forwarded.split(',').map(ip => ip.trim().replace('::ffff:', ''));
-        if (env === 'ngrok' || env === 'local') {
-            const first = ips[0];
-            if (first && first !== '127.0.0.1' && first !== '::1') return first;
-        } else {
-            for (let i = ips.length - 1; i >= 0; i--) {
-                if (isPublicIp(ips[i])) return ips[i];
-            }
-            return ips[0];
+
+        // Birinchi IP odatda asl mijoz IP (Vercel, Nginx, Apache)
+        const first = ips[0];
+        if (first && first !== '127.0.0.1' && first !== '::1' && isPublicIp(first)) {
+            return first;
         }
+
+        // Agar birinchi IP private yoki localhost bo'lsa, keyingi public IP'ni izlaymiz
+        for (const ip of ips) {
+            if (ip && ip !== '127.0.0.1' && ip !== '::1' && isPublicIp(ip)) {
+                return ip;
+            }
+        }
+
+        // Hech narsa topilmasa, birinchisini qaytaramiz (ehtimol hali ham to'g'ri)
+        return first || '0.0.0.0';
     }
+
     const cfIp = req.headers['cf-connecting-ip'];
     if (cfIp) return cfIp.trim();
+
     const realIp = req.headers['x-real-ip'];
     if (realIp) return realIp.trim();
+
     return (req.socket?.remoteAddress || '0.0.0.0').replace('::ffff:', '');
 }
 
