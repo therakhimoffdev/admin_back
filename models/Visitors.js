@@ -2,9 +2,34 @@ import mongoose from 'mongoose';
 
 const visitorSchema = new mongoose.Schema({
     // ── Network ───────────────────────────────────────────────────────────────
-    ip: { type: String, index: true },
+    ip: { type: String, index: true }, // oxirgi/joriy IP
     realIp: { type: String },
     publicIpHint: { type: String }, // ipify.org orqali tasdiqlangan IP
+
+    // ── IP tarixi ────────────────────────────────────────────────────────────
+    // Bir fingerprintId (bir qurilma) turli tarmoqlardan kirganida
+    // har bir yangi IP shu yerga push qilinadi — to'liq vaqt tamg'asi bilan.
+    // Masalan: ertalab uy WiFi, keyin mobil internet, keyin ish WiFi —
+    // barchasi xronologik tartibda saqlanadi.
+    ipHistory: [{
+        ip: { type: String, required: true },
+        firstSeenAt: { type: Date, default: Date.now }, // shu IP bilan birinchi marta kirgan vaqt
+        lastSeenAt: { type: Date, default: Date.now }, // shu IP bilan oxirgi marta ko'ringan vaqt
+        seenCount: { type: Number, default: 1 },       // shu IP bilan necha marta so'rov kelgan
+
+        // Geo va ISP — shu aniq IP uchun
+        country: { type: String },
+        countryCode: { type: String },
+        region: { type: String },
+        city: { type: String },
+        lat: { type: Number },
+        lon: { type: Number },
+        isp: { type: String },        // xom ISP nomi (ipinfo.io org maydoni)
+        asn: { type: String },        // AS raqami, masalan "AS28910"
+        operator: { type: String },        // ← aniqlangan mobil operator: 'Beeline' | 'Ucell' | 'Mobiuz' | 'UzMobile' | ''
+        connectionType: { type: String },     // 'mobile' | 'broadband' | 'wifi' | 'unknown'
+        isVpn: { type: Boolean, default: false },
+    }],
 
     vpnDetected: { type: Boolean, default: false },
     vpnDetails: {
@@ -27,6 +52,9 @@ const visitorSchema = new mongoose.Schema({
         timezone: { type: String, default: 'Unknown' },
         isp: { type: String, default: 'Unknown' },
         org: { type: String, default: 'Unknown' },
+        asn: { type: String, default: '' },
+        operator: { type: String, default: '' }, // ← Beeline | Ucell | Mobiuz | UzMobile
+        connectionType: { type: String, default: 'unknown' }, // mobile | broadband | wifi
     },
 
     // ── Device (UA Parser) ────────────────────────────────────────────────────
@@ -132,6 +160,10 @@ visitorSchema.index({ 'fingerprint.id': 1 }, { sparse: true });
 
 // fingerprintId yo'q hollarda fallback
 visitorSchema.index({ sessionId: 1, ip: 1 });
+
+// Tarixiy IP bo'yicha qidirish (masalan "shu IP qaysi visitorlarda bo'lgan")
+visitorSchema.index({ 'ipHistory.ip': 1 });
+visitorSchema.index({ 'geo.operator': 1 });
 
 // Admin panel uchun
 visitorSchema.index({ visitedAt: -1 });

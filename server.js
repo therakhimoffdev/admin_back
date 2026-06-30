@@ -97,6 +97,9 @@ async function getIpInfo(ip) {
         timezone: geo?.timezone || 'Unknown',
         isp: 'Unknown',
         org: 'Unknown',
+        asn: '',
+        operator: '',
+        connectionType: 'unknown',
     };
 
     const token = process.env.IPINFO_TOKEN;
@@ -108,6 +111,10 @@ async function getIpInfo(ip) {
             if (res.ok) {
                 const d = await res.json();
                 const [lat, lon] = (d.loc || '0,0').split(',').map(Number);
+                const { asn, companyName } = parseOrgField(d.org || '');
+                const operator = detectOperator(d.org || '', asn);
+                const connectionType = detectConnectionType(operator, d.org || '');
+
                 return {
                     country: d.country_name || d.country || base.country,
                     countryCode: d.country || base.countryCode,
@@ -116,8 +123,11 @@ async function getIpInfo(ip) {
                     lat: isNaN(lat) ? base.lat : lat,
                     lon: isNaN(lon) ? base.lon : lon,
                     timezone: d.timezone || base.timezone,
-                    isp: d.hostname || base.isp,
+                    isp: companyName || d.hostname || base.isp,
                     org: d.org || base.org,
+                    asn,
+                    operator,
+                    connectionType,
                 };
             }
         } catch (err) {
@@ -127,12 +137,49 @@ async function getIpInfo(ip) {
     return base;
 }
 
+// ======================== O'ZBEKISTON OPERATORLARINI ANIQLASH ========================
+const OPERATOR_PATTERNS = [
+    { name: 'Beeline', asn: ['AS28910'], keywords: ['unitel', 'beeline'] },
+    { name: 'Ucell', asn: ['AS41202'], keywords: ['coscom', 'ucell'] },
+    { name: 'Mobiuz', asn: ['AS29426'], keywords: ['universal mobile systems', 'ums', 'mobiuz'] },
+    { name: 'UzMobile', asn: ['AS8193', 'AS201767'], keywords: ['uztelecom', 'uzbektelecom', 'uzmobile'] },
+    { name: 'Perfectum', asn: [], keywords: ['perfectum'] },
+    { name: 'Humans', asn: [], keywords: ['humans'] },
+];
+
+function detectOperator(org = '', asn = '') {
+    const orgLc = org.toLowerCase();
+    const asnUp = (asn || '').toUpperCase();
+
+    for (const op of OPERATOR_PATTERNS) {
+        if (op.asn.includes(asnUp)) return op.name;
+        if (op.keywords.some(k => orgLc.includes(k))) return op.name;
+    }
+    return '';
+}
+
+function parseOrgField(org = '') {
+    const match = /^(AS\d+)\s+(.*)$/.exec(org.trim());
+    if (match) return { asn: match[1], companyName: match[2] };
+    return { asn: '', companyName: org };
+}
+
+function detectConnectionType(operatorName, org = '') {
+    if (operatorName) return 'mobile';
+    const orgLc = org.toLowerCase();
+    if (/hosting|datacenter|cloud|vps/.test(orgLc)) return 'hosting';
+    if (/telecom|fiber|broadband|isp/.test(orgLc)) return 'broadband';
+    return 'unknown';
+}
+
+// ======================== VPN ANIQLASH ========================
 const VPN_KEYWORDS = [
     'vpn', 'proxy', 'tor', 'nordvpn', 'expressvpn', 'surfshark', 'mullvad',
     'protonvpn', 'hidemyass', 'cyberghost', 'ipvanish', 'privateinternetaccess',
     'pia', 'windscribe', 'tunnelbear', 'm247', 'datacamp', 'quadranet',
     'choopa', 'vultr', 'linode', 'digitalocean', 'hetzner', 'ovh', 'leaseweb',
 ];
+
 function detectVpnFromOrg(org = '') {
     const lc = org.toLowerCase();
     return VPN_KEYWORDS.some(k => lc.includes(k));
@@ -198,7 +245,7 @@ app.use(cors({
         if (!origin) return cb(null, true);
         const allowed = allowedOrigins.some(o => origin === o || origin.startsWith(o));
         if (!allowed) logger.warn('CORS blocked', { origin });
-        cb(null, true);
+        cb(null, true); // ehtiyot bo'ling: hozir hammaga ruxsat
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -232,18 +279,12 @@ app.use(async (req, res, next) => {
     }
 });
 
-// ======================== TRACK ENDPOINT ========================
-// ── Duplicate oldini olish strategiyasi ──────────────────────────────────────
-// 1-ustuvorlik: fingerprintId (cookie) — eng ishonchli
-// 2-ustuvorlik: sessionId + IP — bir seans, bir zapis
-// Agar birinchi kirishda shu key bor bo'lsa → update qilamiz (pageviews++)
-// Agar yangi bo'lsa → insert qilamiz
-//
-// Visitor modelida yangi indeks kerak bo'ladi:
-//   fingerprintId: { type: String, sparse: true }
-//   sessionId:     { type: String }
-// Quyidagi upsert logika ular bo'lishini talab qiladi.
-// ─────────────────────────────────────────────────────────────────────────────
+// ======================== TRACK ENDPOINT (IP TARIXI BILAN) ========================
+app.options('/api/track', cors()); // preflight uchun
+app.get('/api/track', trackLimit, (req, res) => {
+    res.status(200).json({ ok: true, message: 'Use POST for tracking data' });
+});
+
 app.post('/api/track', trackLimit, async (req, res, next) => {
     const { requestId } = req;
     try {
@@ -253,7 +294,6 @@ app.post('/api/track', trackLimit, async (req, res, next) => {
 
         logger.debug('Track: processing', { requestId, ip });
 
-        // ── Parallel: geo info + UA parse ────────────────────────────────────
         const [geoData, deviceData] = await Promise.all([
             getIpInfo(ip),
             Promise.resolve(parseUserAgent(ua)),
@@ -261,8 +301,6 @@ app.post('/api/track', trackLimit, async (req, res, next) => {
 
         const isVpn = detectVpnFromOrg(geoData.org);
 
-        // ── Frontend dan kelgan ma'lumotlarni xavfsiz mapping ────────────────
-        // Frontend screen: { width, height, colorDepth, pixelRatio } yuboradi
         const screen = body.screen || {};
         const viewport = body.viewport || {};
         const touch = body.touch || {};
@@ -270,9 +308,6 @@ app.post('/api/track', trackLimit, async (req, res, next) => {
         const fingerprint = body.fingerprint || {};
         const webrtcLeak = body.webrtcLeak || {};
 
-        // ── Duplicate key tanlash ─────────────────────────────────────────────
-        // fingerprintId mavjud bo'lsa — uni ishlatamiz (eng kuchli identifier)
-        // Yo'q bo'lsa — sessionId bilan IP kombinatsiyasi
         const fingerprintId = fingerprint.id || '';
         const sessionId = body.sessionId || '';
 
@@ -280,7 +315,6 @@ app.post('/api/track', trackLimit, async (req, res, next) => {
             ? { 'fingerprint.id': fingerprintId }
             : { sessionId, ip };
 
-        // ── Returning visitor: 30 kun ichida shu key bor bo'lsa ──────────────
         const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
         const existingVisitor = await Visitor.findOne({
             ...dedupeKey,
@@ -289,7 +323,7 @@ app.post('/api/track', trackLimit, async (req, res, next) => {
 
         const isReturning = !!existingVisitor;
 
-        // ── Yoziladigan ma'lumotlar ───────────────────────────────────────────
+        // Yangi visitor uchun to'liq ma'lumot
         const visitorData = {
             ip,
             vpnDetected: isVpn || webrtcLeak.detected || false,
@@ -299,11 +333,10 @@ app.post('/api/track', trackLimit, async (req, res, next) => {
                 isTor: (geoData.org || '').toLowerCase().includes('tor'),
                 isHosting: /hosting|datacenter|cloud/i.test(geoData.org),
                 org: geoData.org,
-                asn: '',
+                asn: geoData.asn || '',
             },
             geo: geoData,
             device: deviceData,
-            // ── To'g'ri mapping: server modeliga mos ─────────────────────────
             client: {
                 screenWidth: Number(screen.width) || 0,
                 screenHeight: Number(screen.height) || 0,
@@ -335,47 +368,111 @@ app.post('/api/track', trackLimit, async (req, res, next) => {
                 publicIps: Array.isArray(webrtcLeak.publicIps) ? webrtcLeak.publicIps : [],
             },
             fingerprint: {
-                id: fingerprint.id || '',
+                id: fingerprintId,
                 canvas: fingerprint.canvas || '',
                 audio: fingerprint.audio || '',
                 webgl: fingerprint.webgl || '',
                 webglVendor: fingerprint.webglVendor || '',
                 fonts: fingerprint.fonts || '',
-                hash: fingerprint.id || '',
+                hash: fingerprintId,
             },
             sessionId,
             pageLoadTime: Number(body.loadTime) || 0,
             country: geoData.countryCode,
             isReturning,
-            // Qo'shimcha qulay maydonlar
             publicIpHint: (body.publicIpHint || '').slice(0, 45),
             battery: body.battery || null,
             connection: body.connection || null,
-            // Pageview counter
             visitedAt: new Date(),
             lastSeenAt: new Date(),
         };
 
-        // ── Upsert: yangi bo'lsa insert, bo'lsa pageviews ++ ─────────────────
         let visitor;
         if (existingVisitor) {
-            // Mavjud yozuvni yangilash: ba'zi maydonlar o'zgarishi mumkin
-            visitor = await Visitor.findByIdAndUpdate(
-                existingVisitor._id,
-                {
-                    $set: {
-                        lastSeenAt: new Date(),
-                        'page.url': visitorData.page.url,
-                        'page.title': visitorData.page.title,
-                        'page.path': visitorData.page.path,
-                        onLine: visitorData.client.onLine,
-                    },
-                    $inc: { pageviews: 1 },
-                },
-                { new: true }
+            // IP tarixini boshqarish
+            const existingIpEntry = (existingVisitor.ipHistory || []).find(
+                entry => entry.ip === ip
             );
+
+            if (existingIpEntry) {
+                // mavjud IP uchun seenCount oshirish
+                await Visitor.updateOne(
+                    { _id: existingVisitor._id, 'ipHistory.ip': ip },
+                    {
+                        $set: {
+                            'ipHistory.$.lastSeenAt': new Date(),
+                            lastSeenAt: new Date(),
+                            'page.url': visitorData.page.url,
+                            'page.title': visitorData.page.title,
+                            'page.path': visitorData.page.path,
+                            onLine: visitorData.client.onLine,
+                        },
+                        $inc: {
+                            'ipHistory.$.seenCount': 1,
+                            pageviews: 1,
+                        },
+                    }
+                );
+                visitor = await Visitor.findById(existingVisitor._id);
+            } else {
+                // yangi IP qo'shish
+                const newIpHistoryEntry = {
+                    ip,
+                    firstSeenAt: new Date(),
+                    lastSeenAt: new Date(),
+                    seenCount: 1,
+                    country: geoData.country,
+                    countryCode: geoData.countryCode,
+                    region: geoData.region,
+                    city: geoData.city,
+                    lat: geoData.lat,
+                    lon: geoData.lon,
+                    isp: geoData.isp,
+                    asn: geoData.asn,
+                    operator: geoData.operator,
+                    connectionType: geoData.connectionType,
+                    isVpn: isVpn || false,
+                };
+
+                visitor = await Visitor.findByIdAndUpdate(
+                    existingVisitor._id,
+                    {
+                        $set: {
+                            lastSeenAt: new Date(),
+                            'page.url': visitorData.page.url,
+                            'page.title': visitorData.page.title,
+                            'page.path': visitorData.page.path,
+                            onLine: visitorData.client.onLine,
+                        },
+                        $push: { ipHistory: newIpHistoryEntry },
+                        $inc: { pageviews: 1 },
+                    },
+                    { new: true }
+                );
+            }
         } else {
-            visitor = new Visitor({ ...visitorData, pageviews: 1 });
+            // Yangi visitor yaratish
+            visitor = new Visitor({
+                ...visitorData,
+                pageviews: 1,
+                ipHistory: [{
+                    ip,
+                    firstSeenAt: new Date(),
+                    lastSeenAt: new Date(),
+                    seenCount: 1,
+                    country: geoData.country,
+                    countryCode: geoData.countryCode,
+                    region: geoData.region,
+                    city: geoData.city,
+                    lat: geoData.lat,
+                    lon: geoData.lon,
+                    isp: geoData.isp,
+                    asn: geoData.asn,
+                    operator: geoData.operator,
+                    connectionType: geoData.connectionType,
+                    isVpn: isVpn || false,
+                }],
+            });
             await visitor.save();
         }
 

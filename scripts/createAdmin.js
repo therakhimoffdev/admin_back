@@ -5,7 +5,7 @@ import Admin from '../models/Admin.js';
 dotenv.config();
 
 async function createAdmin() {
-    await mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/visitor_tracker');
+    await mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://therakhimoffdev_db_user:40g948_SA@cluster0.31ebssu.mongodb.net/');
     const token = Admin.generateToken();
     const admin = new Admin({
         username: 'therakhimoff',
