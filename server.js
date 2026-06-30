@@ -85,9 +85,8 @@ function isPublicIp(ip) {
     return true;
 }
 
-const ipinfoWrapper = new IPinfoLiteWrapper(process.env.IPINFO_TOKEN || '2ad098822ffc65');
-
 async function getIpInfo(ip) {
+    // 1. Zaxira (offline) ma'lumotlari geoip-lite orqali
     const geo = geoip.lookup(ip);
     const base = {
         country: geo?.country || 'Unknown',
@@ -106,41 +105,54 @@ async function getIpInfo(ip) {
 
     if (isPublicIp(ip)) {
         try {
-            // Vercel ulanishi qotib qolmasligi uchun 5 soniyalik timeout bilan o'raymiz
-            const details = await Promise.race([
-                ipinfoWrapper.lookupIp(ip),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
-            ]);
+            // 2. IP-API.com ga so'rov yuborish (Token kerak emas!)
+            // fields orqali faqat o'zimizga kerakli ma'lumotlarni so'rab olyapmiz (tezroq ishlashi uchun)
+            const res = await fetch(`http://ip-api.com/json/${ip}?fields=status,message,country,countryCode,regionName,city,lat,lon,timezone,isp,org,as`, {
+                signal: AbortSignal.timeout(5000), // Vercel ulanishi uchun 5 soniya beramiz
+            });
 
-            if (details) {
-                // Kutubxona asn ni obyekt sifatida qaytaradi: { asn: "AS15169", name: "Google LLC", ... }
-                const asnCode = details.asn?.asn || '';
-                const companyName = details.asn?.name || '';
+            if (res.ok) {
+                const d = await res.json();
 
-                const combinedOrg = companyName ? `${asnCode} ${companyName}`.trim() : '';
-                const operator = detectOperator(combinedOrg, asnCode);
-                const connectionType = detectConnectionType(operator, combinedOrg);
+                // IP-API 'status: success' yoki xato bo'lsa 'fail' qaytaradi
+                if (d.status === 'success') {
+                    // IP-API "as" maydonida "AS8193 Uzbektelecom..." formatida qaytaradi
+                    const asString = d.as || '';
+                    const match = /^(AS\d+)\s+(.*)$/.exec(asString.trim());
 
-                return {
-                    country: details.country || base.country,
-                    countryCode: details.countryCode || base.countryCode,
-                    region: details.region || base.region,
-                    city: details.city || base.city,
-                    lat: base.lat,
-                    lon: base.lon,
-                    timezone: details.timezone || base.timezone,
-                    isp: companyName || base.isp,
-                    org: combinedOrg || base.org,
-                    asn: asnCode,
-                    operator,
-                    connectionType,
-                };
+                    const asn = match ? match[1] : '';
+                    const companyName = match ? match[2] : (d.org || d.isp || '');
+                    const combinedOrg = asString || d.org || '';
+
+                    // O'zbekiston operatorlarini aniqlash funksiyalariga yuboramiz
+                    const operator = detectOperator(combinedOrg, asn);
+                    const connectionType = detectConnectionType(operator, combinedOrg);
+
+                    return {
+                        country: d.country || base.country,
+                        countryCode: d.countryCode || base.countryCode,
+                        region: d.regionName || base.region,
+                        city: d.city || base.city,
+                        lat: isNaN(d.lat) ? base.lat : d.lat,
+                        lon: isNaN(d.lon) ? base.lon : d.lon,
+                        timezone: d.timezone || base.timezone,
+                        isp: d.isp || companyName || base.isp,
+                        org: combinedOrg || base.org,
+                        asn,
+                        operator,
+                        connectionType,
+                    };
+                } else {
+                    // Masalan IP private bo'lsa yoki API xato bersa
+                    logger.warn('IP-API xatolik qaytardi', { ip, message: d.message });
+                }
             }
         } catch (err) {
-            logger.warn('IPInfo wrapper failed', { ip, error: err.message });
+            logger.warn('IP-API ulanishda xatolik', { ip, error: err.message });
         }
     }
 
+    // Agar API ga ulanishda muammo bo'lsa, oflayn bazadan javob qaytaramiz
     return base;
 }
 // ======================== O'ZBEKISTON OPERATORLARINI ANIQLASH ========================
