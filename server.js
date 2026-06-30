@@ -447,7 +447,7 @@ app.post('/api/track', trackLimit, async (req, res, next) => {
                         $push: { ipHistory: newIpHistoryEntry },
                         $inc: { pageviews: 1 },
                     },
-                    { new: true }
+                    { returnDocument: 'after' }
                 );
             }
         } else {
